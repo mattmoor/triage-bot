@@ -81,6 +81,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		handleErr(event, HandleOther(event))
 	case *github.PullRequestReviewCommentEvent:
 		handleErr(event, HandleOther(event))
+	case *github.IssuesEvent:
+		handleErr(event, HandleIssues(event))
 	case *github.IssueCommentEvent:
 		handleErr(event, HandleIssueComment(event))
 	default:
@@ -117,6 +119,23 @@ func HandleIssueComment(ice *github.IssueCommentEvent) error {
 	}
 
 	return nil
+}
+
+func HandleIssues(ie *github.IssuesEvent) error {
+	log.Printf("Issue: %v", ie.GetIssue().String())
+
+	// See https://developer.github.com/v3/activity/events/types/#issuesevent
+
+	ctx := context.Background()
+	ghc := GetClient(ctx)
+
+	msg := fmt.Sprintf("Issue event: %v", ie.GetAction())
+	_, _, err := ghc.Issues.CreateComment(ctx,
+		ie.Repo.Owner.GetLogin(), ie.Repo.GetName(), ie.GetIssue().GetNumber(),
+		&github.IssueComment{
+			Body: &msg,
+		})
+	return err
 }
 
 func HandlePullRequest(pre *github.PullRequestEvent) error {
