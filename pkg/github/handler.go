@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -33,23 +32,19 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handleErr := func(event interface{}, err error) {
-		if err == nil {
-			fmt.Fprintf(w, "Handled %T", event)
-			return
-		}
-		log.Printf("Error handling %T: %v", event, err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	// The set of events here should line up with what is in
 	//   config/one-time/github-source.yaml
 	switch event := event.(type) {
 	case *github.PullRequestEvent:
-		handleErr(event, HandlePullRequest(event))
+		if err := HandlePullRequest(event); err != nil {
+			log.Printf("Error handling %T: %v", event, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	case *github.IssuesEvent:
-		handleErr(event, HandleIssues(event))
+		if err := HandleIssues(event); err != nil {
+			log.Printf("Error handling %T: %v", event, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	default:
 		log.Printf("Unrecognized event: %T", event)
 		http.Error(w, "Unknown event", http.StatusBadRequest)
