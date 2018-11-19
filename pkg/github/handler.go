@@ -51,7 +51,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	//     eventType := github.WebHookType(r)
 	// https://github.com/knative/eventing-sources/issues/120
 	// HACK HACK HACK
-	eventType := strings.Split(r.Header.Get("ce-eventtype"), ".")[4]
+	parts := strings.Split(r.Header.Get("ce-eventtype"), ".")
+	eventType := parts[len(parts)-1]
 
 	event, err := github.ParseWebHook(eventType, payload)
 	if err != nil {
@@ -75,16 +76,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	switch event := event.(type) {
 	case *github.PullRequestEvent:
 		handleErr(event, HandlePullRequest(event))
-	case *github.PushEvent:
-		handleErr(event, HandlePush(event))
-	case *github.PullRequestReviewEvent:
-		handleErr(event, HandleOther(event))
-	case *github.PullRequestReviewCommentEvent:
-		handleErr(event, HandleOther(event))
 	case *github.IssuesEvent:
 		handleErr(event, HandleIssues(event))
-	case *github.IssueCommentEvent:
-		handleErr(event, HandleIssueComment(event))
 	default:
 		log.Printf("Unrecognized event: %T", event)
 		http.Error(w, "Unknown event", http.StatusBadRequest)
@@ -92,89 +85,68 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func HandleIssueComment(ice *github.IssueCommentEvent) error {
-	log.Printf("Comment from %s on #%d: %q",
-		ice.Sender.GetLogin(),
-		ice.Issue.GetNumber(),
-		ice.Comment.GetBody())
-
-	// TODO(mattmoor): Is ice.Repo.Owner.Login reliable for organizations, or do we
-	// have to parse the FullName?
-	//    Owner: mattmoor, Repo: kontext, Fullname: mattmoor/kontext
-	// log.Printf("Owner: %s, Repo: %s, Fullname: %s", *ice.Repo.Owner.Login, *ice.Repo.Name,
-	// 	*ice.Repo.FullName)
-
-	if strings.Contains(*ice.Comment.Body, "Hello there.") {
-		ctx := context.Background()
-		ghc := GetClient(ctx)
-
-		msg := fmt.Sprintf("Hello @%s", ice.Sender.GetLogin())
-
-		_, _, err := ghc.Issues.CreateComment(ctx,
-			ice.Repo.Owner.GetLogin(), ice.Repo.GetName(), ice.Issue.GetNumber(),
-			&github.IssueComment{
-				Body: &msg,
-			})
-		return err
+func HandleIssues(ie *github.IssuesEvent) error {
+	if ie.GetIssue().Milestone != nil {
+		log.Printf("Issue #%v already has a milestone.", ie.GetIssue().GetNumber())
+		return nil
+	}
+	if ie.GetIssue().GetState() == "closed" {
+		log.Printf("Issue #%v is closed.", ie.GetIssue().GetNumber())
+		return nil
 	}
 
-	return nil
-}
-
-func HandleIssues(ie *github.IssuesEvent) error {
-	log.Printf("Issue: %v", ie.GetIssue().String())
-
-	// See https://developer.github.com/v3/activity/events/types/#issuesevent
-
-	ctx := context.Background()
-	ghc := GetClient(ctx)
-
-	msg := fmt.Sprintf("Issue event: %v", ie.GetAction())
-	_, _, err := ghc.Issues.CreateComment(ctx,
-		ie.Repo.Owner.GetLogin(), ie.Repo.GetName(), ie.GetIssue().GetNumber(),
-		&github.IssueComment{
-			Body: &msg,
-		})
-	return err
+	return needsTriage(ie.Repo.Owner.GetLogin(), ie.Repo.GetName(), ie.GetIssue().GetNumber())
 }
 
 func HandlePullRequest(pre *github.PullRequestEvent) error {
-	log.Printf("PR: %v", pre.GetPullRequest().String())
+	if pre.GetPullRequest().Milestone != nil {
+		log.Printf("PR #%v already has a milestone.", pre.GetNumber())
+		return nil
+	}
+	if pre.GetPullRequest().GetState() == "closed" {
+		log.Printf("PR #%v is closed.", pre.GetNumber())
+		return nil
+	}
 
-	// TODO(mattmoor): To respond to code changes, I think the appropriate set of events are:
-	// 1. opened
-	// 2. reopened
-	// 3. synchronized
+	return needsTriage(pre.Repo.Owner.GetLogin(), pre.Repo.GetName(), pre.GetNumber())
+}
 
-	// (from https://developer.github.com/v3/activity/events/types/#pullrequestevent)
-	// Other events we might see include:
-	// * assigned
-	// * unassigned
-	// * review_requested
-	// * review_request_removed
-	// * labeled
-	// * unlabeled
-	// * edited
-	// * closed
-
+func needsTriage(owner, repo string, number int) error {
 	ctx := context.Background()
 	ghc := GetClient(ctx)
+	m, err := getOrCreateMilestone(ctx, ghc, owner, repo, "Needs Triage")
+	if err != nil {
+		return err
+	}
 
-	msg := fmt.Sprintf("PR event: %v", pre.GetAction())
-	_, _, err := ghc.Issues.CreateComment(ctx,
-		pre.Repo.Owner.GetLogin(), pre.Repo.GetName(), pre.GetNumber(),
-		&github.IssueComment{
-			Body: &msg,
-		})
+	_, _, err = ghc.Issues.Edit(ctx, owner, repo, number, &github.IssueRequest{
+		Milestone: m.Number,
+	})
 	return err
 }
 
-func HandlePush(pe *github.PushEvent) error {
-	log.Printf("Push: %v", pe.String())
-	return nil
-}
+func getOrCreateMilestone(ctx context.Context, client *github.Client,
+	owner, repo, title string) (*github.Milestone, error) {
+	// Walk the pages of milestones looking for one matching our title.
+	lopt := &github.MilestoneListOptions{}
+	for {
+		ms, resp, err := client.Issues.ListMilestones(ctx, owner, repo, lopt)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range ms {
+			if m.GetTitle() == title {
+				return m, nil
+			}
+		}
+		if lopt.Page == resp.NextPage {
+			break
+		}
+		lopt.Page = resp.NextPage
+	}
 
-func HandleOther(event interface{}) error {
-	log.Printf("TODO %T: %#v", event, event)
-	return nil
+	m, _, err := client.Issues.CreateMilestone(ctx, owner, repo, &github.Milestone{
+		Title: &title,
+	})
+	return m, err
 }

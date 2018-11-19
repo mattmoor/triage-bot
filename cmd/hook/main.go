@@ -3,7 +3,7 @@ package main
 import (
 	"net/http"
 
-	"github.com/mattmoor/hello-github/pkg/github"
+	"github.com/mattmoor/triage-bot/pkg/github"
 )
 
 func main() {
